@@ -1,0 +1,4 @@
+mutagen>=1.47
+musicbrainzngs>=0.7.1
+tqdm>=4.66
+python-slugify>=8.0
