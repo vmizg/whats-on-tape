@@ -24,7 +24,7 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-USER_AGENT = "MusicTapePlanner/0.1 (+https://github.com/local/music-tape-planner; for personal cassette planning)"
+USER_AGENT = "WhatsOnTape/0.1 (+https://github.com/vmizg/whats-on-tape; for personal taped music planning)"
 CACHE_TTL_SEC = 30 * 24 * 60 * 60
 MIN_INTERVAL_SEC = 0.1  # Wikipedia asks for politeness; 10 req/sec is comfortably below limits
 

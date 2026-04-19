@@ -1,0 +1,16 @@
+{
+  "tape_inventory": {
+    "46min": 5,
+    "54min": 2,
+    "60min": 8,
+    "70min": 1,
+    "90min": 4,
+    "120min": 1
+  },
+  "skip_dirs": [
+    "# clips*",
+    "# mixes and compilations*",
+    "# random*",
+    "# recordings & transfers*"
+  ]
+}

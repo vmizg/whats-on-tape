@@ -137,6 +137,7 @@ def scan_library(
     enrich: bool = True,
     lastfm_key: str | None = None,
     cache_dir: Path | None = None,
+    skip_dirs: tuple[str, ...] | None = None,
 ) -> list[Album]:
     """Scan the library and emit albums.json + report.md.
 
@@ -144,6 +145,10 @@ def scan_library(
     .mb-cache, .lastfm-cache, .wiki-cache). When None, defaults to ./.cache.
     Sharing a single cache across multiple runs (e.g. plan with vs without
     --trim) avoids repeating the slow MB / Last.fm / Wikipedia lookups.
+
+    `skip_dirs` overrides the built-in SKIP_DIRS globs used by the library
+    walker. `None` keeps the defaults; `()` scans every folder without
+    skipping.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     cdir = cache_dir if cache_dir is not None else Path(".cache")
@@ -152,7 +157,7 @@ def scan_library(
     cache = _load_cache(cache_path)
     fresh_cache: dict[str, dict[str, Any]] = {}
 
-    folders = walk_library(root)
+    folders = walk_library(root, skip_dirs=skip_dirs)
 
     if not ffprobe_available():
         print("WARNING: ffprobe not found on PATH; DFF/ISO/VOB durations may be missing. Install ffmpeg.")

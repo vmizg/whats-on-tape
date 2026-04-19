@@ -97,6 +97,47 @@ def _format_skip_labels(labels: list[str], max_shown: int = 8) -> str:
     return body
 
 
+def _format_inventory_section(
+    inventory: dict[str, int],
+    counts: dict[str, int],
+) -> list[str]:
+    """Render the 'Tape inventory usage' section for plan.md.
+
+    Shows one row per tape size that was either configured (has a cap) or
+    actually used. '-' in the Cap column means "unlimited" (no cap configured).
+    """
+    rows: list[tuple[str, int, str, str]] = []
+    # Iterate TAPES so order matches the rest of the report (smallest -> largest).
+    for t in TAPES:
+        cap = inventory.get(t.name)
+        used = counts.get(t.name, 0)
+        if cap is None and used == 0:
+            continue
+        cap_str = "-" if cap is None else str(cap)
+        if cap is None:
+            status = ""
+        elif cap == 0:
+            status = "disabled"
+        elif used > cap:
+            status = "OVER CAP"
+        elif used == cap:
+            status = "at cap"
+        else:
+            status = f"{cap - used} left"
+        rows.append((t.name, used, cap_str, status))
+    if not rows:
+        return []
+    lines: list[str] = []
+    lines.append("## Tape inventory usage")
+    lines.append("")
+    lines.append("| Tape | Used | Cap | Status |")
+    lines.append("|------|-----:|----:|--------|")
+    for name, used, cap_str, status in rows:
+        lines.append(f"| {name} | {used} | {cap_str} | {status} |")
+    lines.append("")
+    return lines
+
+
 def _format_side_candidate(c: SideCandidate) -> str:
     if c.source == "library" and c.album is not None:
         return f"{c.album.display} \u2014 {format_hms(c.album.duration_sec)} \u2014 {c.genre or c.album.primary_genre or '?'} [library]"
@@ -113,13 +154,30 @@ def _format_side_candidate(c: SideCandidate) -> str:
     return c.label
 
 
-def write_plan(path: Path, assignments: list[Assignment], unplaced: list[Album]) -> None:
+def write_plan(
+    path: Path,
+    assignments: list[Assignment],
+    unplaced: list[Album],
+    tape_inventory: dict[str, int] | None = None,
+    tape_counts: dict[str, int] | None = None,
+    unplaced_reasons: dict[str, str] | None = None,
+) -> None:
+    """Emit plan.md.
+
+    `tape_inventory` + `tape_counts` are optional and, when both given with any
+    content, render an Inventory usage table at the top. `unplaced_reasons`
+    maps album.path -> reason string; paths not in the dict fall back to the
+    heuristic reason logic (same as before).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
     lines.append("# Tape plan")
     lines.append("")
     lines.append(f"Assignments: **{len(assignments)}**  \nUnplaced albums: **{len(unplaced)}**")
     lines.append("")
+
+    if tape_counts is not None and (tape_inventory or tape_counts):
+        lines.extend(_format_inventory_section(tape_inventory or {}, tape_counts))
 
     for i, asn in enumerate(assignments, 1):
         split = f" ({asn.tape.split_sec // 60}+{asn.tape.split_sec // 60} split)" if asn.tape.splits else ""
@@ -153,7 +211,7 @@ def write_plan(path: Path, assignments: list[Assignment], unplaced: list[Album])
         if asn.note:
             lines.append(f"- Note: {asn.note}")
         # Per-side slack is only meaningful for split tapes where Side A actually
-        # fits on its own physical side. For a 2-hour album filling a 120-min reel
+        # fits on its own physical side. For a 2-hour album filling a 120-min tape
         # that crosses the midpoint, or for solo-on-a-solo-tape, report total slack.
         show_per_side = (
             asn.tape.splits
@@ -180,16 +238,21 @@ def write_plan(path: Path, assignments: list[Assignment], unplaced: list[Album])
         lines.append("| Duration | Artist | Album | Reason |")
         lines.append("|---------:|--------|-------|--------|")
         for a in sorted(unplaced, key=lambda x: -x.duration_sec):
-            t = smallest_fitting_tape(a.duration_sec)
-            if t is None:
-                # Over-length albums we couldn't trim. Compilations are flagged
-                # as needing a manual decision; everything else just won't fit.
-                if is_compilation_title(a.album):
-                    reason = "compilation/live, whole-album only; consider manual 2-sided split"
-                else:
-                    reason = "exceeds all tape sizes; trim heuristic could not shrink to fit"
+            # Prefer an explicit reason from the planner (e.g. "tape inventory
+            # exhausted for ..."). Otherwise fall back to the length-based
+            # heuristic reasons.
+            override = (unplaced_reasons or {}).get(a.path)
+            if override:
+                reason = override
             else:
-                reason = "no compatible pairing slot"
+                t = smallest_fitting_tape(a.duration_sec)
+                if t is None:
+                    if is_compilation_title(a.album):
+                        reason = "compilation/live, whole-album only; consider manual 2-sided split"
+                    else:
+                        reason = "exceeds all tape sizes; trim heuristic could not shrink to fit"
+                else:
+                    reason = "no compatible pairing slot"
             lines.append(f"| {format_hms(a.duration_sec)} | {a.artist} | {a.album} | {reason} |")
         lines.append("")
 

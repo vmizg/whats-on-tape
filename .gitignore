@@ -14,3 +14,4 @@ out_trim_all/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+plan_config.json

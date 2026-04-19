@@ -1,19 +1,19 @@
 # What's On Tape?
 
-Scan a local music library and plan which albums go onto which cassette / reel-to-reel tape. B-sides are paired by genre using a fallback ladder: local library (tight genre) → local library (relaxed genre, same parent bucket) → MusicBrainz suggestions → Last.fm suggestions → RateYourMusic / Discogs search URLs.
+Scan a local music library and plan which albums go onto which tape. B-sides are paired by genre using a fallback ladder: local library (tight genre) → local library (relaxed genre, same parent bucket) → MusicBrainz suggestions → Last.fm suggestions → RateYourMusic / Discogs search URLs.
 
 ## Tape sizes
 
-| Length | Split | Notes |
-| ------ | ----- | ----- |
-| 46 min | no    | cassette |
-| 54 min | no    | cassette |
-| 60 min | 30+30 | cassette / reel |
-| 70 min | 35+35 | cassette |
-| 90 min | 45+45 | cassette / reel |
-| 120 min| 60+60 | reel |
+| Length  | Split | Name     |
+| ------- | ----- | -------- |
+| 46 min  | no    | `46min`  |
+| 54 min  | no    | `54min`  |
+| 60 min  | 30+30 | `60min`  |
+| 70 min  | 35+35 | `70min`  |
+| 90 min  | 45+45 | `90min`  |
+| 120 min | 60+60 | `120min` |
 
-**Strict per-side fit** is the default on split tapes: each side must physically hold its album(s), no spilling across the midpoint (which matches how cassettes actually work). Override with `--allow-overlapping-sides` to let Side B share Side A's remaining budget.
+**Strict per-side fit** is the default on split tapes: each side must physically hold its album(s), no spilling across the midpoint (which matches how physical tape sides actually work). Override with `--allow-overlapping-sides` to let Side B share Side A's remaining budget.
 
 **Stretch tolerance** — each tape has a small per-side over-capacity allowance (typically 120–300 s) so a 31-min album fits a 30-min side, a 47-min album fits a 45-min side, and so on. Tweakable in `src/tapes.py:STRETCH_TOLERANCE_SEC`.
 
@@ -106,9 +106,41 @@ Modes:
 
 - `--trim off` — never trim; over-length albums land in the unplaced section.
 - `--trim unplaced` (default) — only try the expensive MB / tag-reading path for unplaceable albums.
-- `--trim all` — trim every over-length deluxe reissue before planning, even if it would already fit a bigger tape. Gives the greedy planner more flexibility (a 2:05:00 deluxe version of a 45-min album can end up on a 46-min cassette) but makes `plan.md` reflect an opinionated "core" for every reissue.
+- `--trim all` — trim every over-length deluxe reissue before planning, even if it would already fit a bigger tape. Gives the greedy planner more flexibility (a 2:05:00 deluxe version of a 45-min album can end up on a `46min` tape) but makes `plan.md` reflect an opinionated "core" for every reissue.
 
 **Compilations and live albums are never trimmed** (`Best Of`, `Greatest Hits`, `Pulse (Live)`, `The Essential ...`, soundtracks, bootleg series). There's no meaningful canonical shorter version. These end up in the unplaced section flagged as "consider manual 2-sided split".
+
+### Config file (tape inventory & skip-prefixes)
+
+A JSON file (default `./plan_config.json`, overridable with `--config PATH`) lets you pin **real-world tape inventory** and override the **top-level folder skip list** without hand-editing the source. Both keys are optional.
+
+```json
+{
+  "tape_inventory": {
+    "46min": 5,
+    "54min": 2,
+    "60min": 8,
+    "70min": 1,
+    "90min": 4,
+    "120min": 1
+  },
+  "skip_dirs": ["# clips*", "# mixes and compilations*", "**/Demos"]
+}
+```
+
+See `plan_config.example.json` for a full template.
+
+**Tape inventory** — caps how many tapes of each size the planner may hand out in a single plan. Keys are canonical tape names (`46min`, `54min`, `60min`, `70min`, `90min`, `120min`); a bare number like `"70"` also works as a shortcut. Missing size = unlimited. `0` = disabled. When a preferred size runs out, the planner first tries to **downsize** (trim bonus tracks per your `--trim` policy so the album fits a smaller tape that still has stock), and only upsizes to the next larger in-stock tape if the trim fails. Albums that can't be placed because every compatible size is exhausted are reported with a dedicated "tape inventory exhausted for ..." reason.
+
+`plan.md` gets a **Tape inventory usage** table at the top showing used vs cap per size, plus status (`at cap`, `N left`, `disabled`, `OVER CAP`).
+
+**Skip dirs** — a list of shell-style glob patterns that prune folders from the library walk. When present, **fully replaces** the built-in `SKIP_DIRS` (does not merge). Matching is case-insensitive and uses `fnmatch` semantics (same family as `.gitignore` / `rsync --exclude`):
+
+- Bare patterns without `/` match the folder's **basename at any depth** — `"# clips*"` prunes any folder whose name starts with `# clips`, wherever it sits in the tree.
+- Patterns containing `/` are matched against the **full path relative to the library root** (POSIX separators), so `"Jazz/**/Demos"` prunes any folder named `Demos` somewhere under a top-level `Jazz` folder, without touching Demos folders elsewhere.
+- `*` matches any characters (including `/`), `?` matches one character, `[abc]` matches a character class. Backslashes in patterns are auto-converted to `/`, so Windows-style paths in the config file also work.
+
+Use `[]` to scan every folder with no pruning. `scan` consumes this; `plan` accepts the same file so you can keep one config alongside the project.
 
 ### Slack caps
 
@@ -137,6 +169,7 @@ Delete any cache file to force a refetch for just that layer. Delete `.scan-cach
 `plan`:
 
 - `-o, --out` — output directory (default `out/`).
+- `--config PATH` — JSON config file; defaults to `./plan_config.json` if present.
 - `--cache-dir` — cache directory (default `.cache/`).
 - `--candidates PATH` — restrict to album folders listed in PATH.
 - `--no-musicbrainz` / `--no-lastfm` / `--skip-external` — turn off external lookups.
@@ -149,8 +182,8 @@ Delete any cache file to force a refetch for just that layer. Delete `.scan-cach
 
 `scan`:
 
-- `-o, --out`, `--cache-dir`, `--no-progress`, `--workers`, `--no-enrich`, `--lastfm-key` — as above.
+- `-o, --out`, `--config`, `--cache-dir`, `--no-progress`, `--workers`, `--no-enrich`, `--lastfm-key` — as above. `scan` additionally honors `skip_dirs` from the config file.
 
 ## Library layout expected
 
-Leaf album folders named `Artist - Album Name (Year) [Source]`, e.g. `AC-DC - Back In Black (1980) [CD]`. The separator accepts ASCII ` - `, en-dash ` – `, and em-dash ` — `. Multi-disc albums (child folders like `CD1`, `Disc 2`, `LP1`) are summed into one record, tolerating helper folders (`VIDEO_TS`, `Artwork`, etc.) that contain no audio. Some top-level folders are skipped — see `SKIP_TOP_PREFIXES` for the full list.
+Leaf album folders named `Artist - Album Name (Year) [Source]`, e.g. `AC-DC - Back In Black (1980) [CD]`. The separator accepts ASCII ` - `, en-dash ` – `, and em-dash ` — `. Multi-disc albums (child folders like `CD1`, `Disc 2`, `LP1`) are summed into one record, tolerating helper folders (`VIDEO_TS`, `Artwork`, etc.) that contain no audio. Some folders are pruned from the walk — see `SKIP_DIRS` in `src/discovery.py` for the built-in defaults, or override with `skip_dirs` in `plan_config.json`.

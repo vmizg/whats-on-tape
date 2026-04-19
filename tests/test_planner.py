@@ -26,7 +26,7 @@ def test_solo_fit_picks_smallest_tape():
 
 def test_solo_preferred_when_split_slack_is_small():
     # 43-min Rock album on its own:
-    # - fits the 46-min cassette with ~2 min slack -> solo wins
+    # - fits the 46-min tape with ~2 min slack -> solo wins
     # - also fits on one side of the 90-min split, but we have no partner
     a = album("X", "Album", 43 * 60, ["Rock"])
     assignments, _ = plan_tapes([a], mb=None, cfg=PlannerConfig(allow_musicbrainz=False))
@@ -35,9 +35,9 @@ def test_solo_preferred_when_split_slack_is_small():
     assert assignments[0].match_kind == "solo"
 
 
-def test_split_pairing_preferred_over_solo_cassette():
+def test_split_pairing_preferred_over_solo_small_tape():
     # A 28-min Rock album with no partner is preferably placed on the 60-min split tape
-    # (so Part B can go hunt for a filler) rather than wasting a 46-min cassette solo.
+    # (so Part B can go hunt for a filler) rather than wasting a 46-min tape solo.
     a = album("X", "Album", 28 * 60, ["Rock"])
     assignments, _ = plan_tapes([a], mb=None, cfg=PlannerConfig(allow_musicbrainz=False))
     assert assignments[0].tape.total_sec == 60 * 60
@@ -328,7 +328,7 @@ def test_stretch_tolerance_allows_31_min_album_on_30_min_side():
 
 
 def test_stretch_tolerance_allows_124_min_album_on_120_min_tape():
-    """A 124-min album fits the 120-min reel solo (300s tolerance for 120-min)."""
+    """A 124-min album fits the 120-min tape solo (300s tolerance for 120-min)."""
     a = album("A", "Long", 124 * 60, ["Rock"])
     cfg = PlannerConfig(allow_musicbrainz=False, allow_lastfm=False, buffer_sec=60)
     assignments, unplaced = plan_tapes([a], mb=None, cfg=cfg)
@@ -369,3 +369,185 @@ def test_stretch_tolerance_lookup_picks_largest_key_under_capacity():
     t46 = next(t for t in TAPES if t.total_sec == 46 * 60)
     assert effective_total_sec(t46) == 46 * 60 + 180
     assert effective_split_sec(t46) is None  # non-split tape
+
+
+# ---------------------------------------------------------------------------
+# Tape inventory caps (plan_config.json -> PlannerConfig.tape_inventory)
+# ---------------------------------------------------------------------------
+
+
+def test_inventory_cap_forces_upsize_when_preferred_exhausted():
+    """Three 28-min rock albums normally all land on the 60-min split tape.
+    With cap=1 on 60-min, the rest should upsize to the next available tape."""
+    a = album("A", "Rock1", 28 * 60, ["Hard Rock"])
+    b = album("B", "Rock2", 27 * 60, ["Hard Rock"])
+    c = album("C", "Rock3", 26 * 60, ["Hard Rock"])
+    cfg = PlannerConfig(
+        allow_musicbrainz=False, allow_lastfm=False,
+        trim_mode="off",  # no downsize path for these short albums
+        tape_inventory={"60min": 1},
+    )
+    counts: dict[str, int] = {}
+    assignments, unplaced = plan_tapes(
+        [a, b, c], mb=None, cfg=cfg, tape_counts_out=counts,
+    )
+    # At most one 60-min tape should be assigned.
+    assert counts.get("60min", 0) <= 1
+    # All three albums should still be placed (upsized, not unplaced).
+    placed_paths = {asn.side_a.path for asn in assignments}
+    for x in (a, b, c):
+        assert x.path in placed_paths or any(
+            asn.side_b is not None and asn.side_b.path == x.path
+            for asn in assignments
+        )
+    assert unplaced == []
+
+
+def test_inventory_cap_zero_disables_tape_size():
+    """cap=0 means 'never use this size'. A 28-min album should NOT land on
+    the 60-min split tape; it should upsize to 70-min."""
+    a = album("A", "Rock1", 28 * 60, ["Hard Rock"])
+    cfg = PlannerConfig(
+        allow_musicbrainz=False, allow_lastfm=False,
+        tape_inventory={"60min": 0},
+    )
+    assignments, _ = plan_tapes([a], mb=None, cfg=cfg)
+    assert assignments[0].tape.name != "60min"
+
+
+def test_inventory_exhausted_marks_unplaced_with_reason():
+    """When every size big enough is out of stock, the album lands in unplaced
+    with a specific 'tape inventory exhausted' reason."""
+    a = album("A", "Rock1", 28 * 60, ["Hard Rock"])
+    # Disable every size that would fit a 28-min album.
+    cfg = PlannerConfig(
+        allow_musicbrainz=False, allow_lastfm=False,
+        trim_mode="off",
+        tape_inventory={
+            "46min": 0,
+            "54min": 0,
+            "60min": 0,
+            "70min": 0,
+            "90min": 0,
+            "120min": 0,
+        },
+    )
+    reasons: dict[str, str] = {}
+    assignments, unplaced = plan_tapes(
+        [a], mb=None, cfg=cfg, unplaced_reasons=reasons,
+    )
+    assert assignments == []
+    assert len(unplaced) == 1
+    assert "inventory exhausted" in reasons.get(a.path, "")
+
+
+def test_inventory_tape_counts_out_populated():
+    """tape_counts_out should reflect actually-committed tapes."""
+    a = album("A", "Rock1", 43 * 60, ["Rock"])  # fits 46-min solo
+    cfg = PlannerConfig(allow_musicbrainz=False, allow_lastfm=False)
+    counts: dict[str, int] = {}
+    plan_tapes([a], mb=None, cfg=cfg, tape_counts_out=counts)
+    assert counts == {"46min": 1}
+
+
+def test_inventory_no_caps_matches_previous_behavior():
+    """With an empty tape_inventory, the planner's behavior is identical to
+    the no-caps baseline (regression guard for the new plumbing)."""
+    a = album("A", "Rock1", 40 * 60, ["Rock"])
+    baseline, _ = plan_tapes(
+        [a], mb=None,
+        cfg=PlannerConfig(allow_musicbrainz=False, allow_lastfm=False),
+    )
+    with_empty_inv, _ = plan_tapes(
+        [a], mb=None,
+        cfg=PlannerConfig(
+            allow_musicbrainz=False, allow_lastfm=False,
+            tape_inventory={},
+        ),
+    )
+    assert baseline[0].tape == with_empty_inv[0].tape
+    assert baseline[0].match_kind == with_empty_inv[0].match_kind
+
+
+def test_inventory_downsize_when_preferred_exhausted_and_trim_possible(
+    tmp_path, monkeypatch
+):
+    """Exercises the trim-for-downsize path: when the ideal tape is capped but
+    a smaller tape has stock, and compute_trim can shrink the album to fit
+    the smaller tape, the planner should pick the smaller one.
+
+    We mock compute_trim via monkeypatching because the real one reads audio
+    files from disk; this keeps the test pure.
+    """
+    from src import planner as planner_mod
+    from src.trim import TrimResult
+
+    # A 65-min album would ordinarily pick the 70-min tape. We cap EVERY size
+    # it could fit un-trimmed (70/90/120) to zero, leaving only the 46-min tape
+    # available. Its "core" (per the fake trim) is 40 min, which fits the 46-min
+    # effective capacity. So the planner should downsize.
+    a = album("A", "Deluxe", 65 * 60, ["Rock"])
+
+    def fake_trim(album_obj, max_tape_sec, mb=None, min_improvement_sec=60):
+        return TrimResult(
+            original_duration_sec=album_obj.duration_sec,
+            trimmed_duration_sec=40 * 60,
+            method="title-heuristic",
+            note="fake trim for test",
+            skip_labels=["(Demo)"],
+        )
+
+    monkeypatch.setattr(planner_mod, "compute_trim", fake_trim)
+
+    cfg = PlannerConfig(
+        allow_musicbrainz=False, allow_lastfm=False,
+        trim_mode="unplaced",
+        tape_inventory={
+            "54min": 0,
+            "60min": 0,
+            "70min": 0,
+            "90min": 0,
+            "120min": 0,
+        },
+    )
+    assignments, unplaced = plan_tapes([a], mb=None, cfg=cfg)
+    assert unplaced == []
+    assert len(assignments) == 1
+    asn = assignments[0]
+    assert asn.tape.name == "46min", (
+        f"expected downsize to 46min, got {asn.tape.name}"
+    )
+    assert asn.match_kind == "solo-trimmed"
+    assert asn.side_a.duration_sec == 40 * 60
+    assert asn.side_a_original_sec == 65 * 60
+    assert asn.side_a_trim_skipped == ["(Demo)"]
+
+
+def test_inventory_downsize_skipped_when_trim_mode_off(monkeypatch):
+    """trim_mode='off' must not invoke the downsize-via-trim path at all."""
+    from src import planner as planner_mod
+    from src.trim import TrimResult
+
+    calls = {"n": 0}
+    def fake_trim(*args, **kwargs):
+        calls["n"] += 1
+        return TrimResult(original_duration_sec=0, trimmed_duration_sec=0, method="none")
+
+    monkeypatch.setattr(planner_mod, "compute_trim", fake_trim)
+
+    # 58-min album: beyond 54-min's effective capacity (~57 min) so would normally
+    # go on 60-min. With 60-min capped AND trim_mode='off', the planner must
+    # upsize (to some larger tape) and MUST NOT attempt to compute a trim.
+    a = album("A", "Album", 58 * 60, ["Rock"])
+    cfg = PlannerConfig(
+        allow_musicbrainz=False, allow_lastfm=False,
+        trim_mode="off",
+        tape_inventory={"60min": 0},
+    )
+    assignments, unplaced = plan_tapes([a], mb=None, cfg=cfg)
+    assert calls["n"] == 0, "compute_trim should not run in trim_mode='off'"
+    assert unplaced == []
+    assert len(assignments) == 1
+    assert assignments[0].tape.total_sec > 60 * 60, (
+        f"expected upsize above capped 60-min size, got {assignments[0].tape.name}"
+    )

@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 
+from .config import ConfigError, PlanConfig, load_config
 from .dotenv import load_dotenv
 from .lastfm import LastFmClient
 from .musicbrainz import MBClient
@@ -13,17 +14,41 @@ from .planner import PlannerConfig, load_candidates_filter, plan_tapes
 from .report import read_albums_json, write_plan
 from .scan import scan_library
 
+_DEFAULT_CONFIG_PATH = Path("plan_config.json")
+
+
+def _load_cli_config(explicit: Path | None) -> PlanConfig:
+    """Resolve the effective config:
+      - `--config path.json` -> load that path (error if missing).
+      - no flag and ./plan_config.json exists -> load it (silent default).
+      - otherwise -> empty PlanConfig (no caps, no prefix override).
+    """
+    if explicit is not None:
+        return load_config(explicit)
+    if _DEFAULT_CONFIG_PATH.exists():
+        return load_config(_DEFAULT_CONFIG_PATH)
+    return PlanConfig()
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="music",
-        description="Scan a music library and plan cassette/reel tape assignments.",
+        description="Scan a music library and plan tape assignments.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     scan = sub.add_parser("scan", help="Scan a music library and emit albums.json + report.md")
     scan.add_argument("root", type=Path, help="Root library directory (e.g. H:\\Music)")
     scan.add_argument("-o", "--out", type=Path, default=Path("out"), help="Output directory")
+    scan.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "Path to plan_config.json. When omitted, ./plan_config.json is used "
+            "if present. Currently reads `skip_dirs` for the scan step."
+        ),
+    )
     scan.add_argument(
         "--cache-dir",
         type=Path,
@@ -47,6 +72,16 @@ def _build_parser() -> argparse.ArgumentParser:
     plan.add_argument("albums_json", type=Path, help="Path to albums.json produced by scan")
     plan.add_argument("-o", "--out", type=Path, default=Path("out"), help="Output directory")
     plan.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "Path to plan_config.json. When omitted, ./plan_config.json is used "
+            "if present. Reads `tape_inventory` (max tapes per size) and "
+            "`skip_dirs` (informational for plan; scan applies it)."
+        ),
+    )
+    plan.add_argument(
         "--cache-dir",
         type=Path,
         default=Path(".cache"),
@@ -68,7 +103,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Let Side B share the tape's total budget with Side A instead of fitting "
             "within its own physical side. Default is strict per-side fit, which "
-            "matches how cassettes physically work."
+            "matches how physical tape sides actually work."
         ),
     )
     plan.add_argument(
@@ -113,6 +148,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if not root.exists():
         print(f"error: root not found: {root}", file=sys.stderr)
         return 2
+    try:
+        plan_cfg = _load_cli_config(args.config)
+    except ConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if plan_cfg.source_path is not None:
+        print(f"Using config: {plan_cfg.source_path}")
     out = args.out
     lastfm_key = args.lastfm_key or os.environ.get("LASTFM_API_KEY", "").strip() or None
     albums = scan_library(
@@ -123,6 +165,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         enrich=not args.no_enrich,
         lastfm_key=lastfm_key,
         cache_dir=args.cache_dir,
+        skip_dirs=plan_cfg.skip_dirs,
     )
     print(f"Scanned {len(albums)} albums -> {out / 'albums.json'}")
     print(f"Report: {out / 'report.md'}")
@@ -134,6 +177,17 @@ def cmd_plan(args: argparse.Namespace) -> int:
     if not albums_path.exists():
         print(f"error: albums.json not found: {albums_path}", file=sys.stderr)
         return 2
+    try:
+        plan_cfg = _load_cli_config(args.config)
+    except ConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if plan_cfg.source_path is not None:
+        print(f"Using config: {plan_cfg.source_path}")
+        if plan_cfg.has_inventory:
+            # Compact summary so the user can see at-a-glance that caps are live.
+            pairs = ", ".join(f"{k}={v}" for k, v in plan_cfg.tape_inventory.items())
+            print(f"  tape_inventory: {pairs}")
 
     albums = read_albums_json(albums_path)
     if args.candidates:
@@ -162,13 +216,29 @@ def cmd_plan(args: argparse.Namespace) -> int:
         max_slack_small_sec=args.max_slack_small_sec,
         max_slack_large_sec=args.max_slack_large_sec,
         trim_mode=args.trim,
+        tape_inventory=dict(plan_cfg.tape_inventory),
     )
 
+    unplaced_reasons: dict[str, str] = {}
+    tape_counts_out: dict[str, int] = {}
     assignments, unplaced = plan_tapes(
-        albums, mb=mb, lastfm=lastfm, cfg=cfg, progress=not args.no_progress
+        albums,
+        mb=mb,
+        lastfm=lastfm,
+        cfg=cfg,
+        progress=not args.no_progress,
+        unplaced_reasons=unplaced_reasons,
+        tape_counts_out=tape_counts_out,
     )
     plan_path = out / "plan.md"
-    write_plan(plan_path, assignments, unplaced)
+    write_plan(
+        plan_path,
+        assignments,
+        unplaced,
+        tape_inventory=cfg.tape_inventory,
+        tape_counts=tape_counts_out,
+        unplaced_reasons=unplaced_reasons,
+    )
 
     # Quick summary of how each assignment was resolved.
     counts: dict[str, int] = {}

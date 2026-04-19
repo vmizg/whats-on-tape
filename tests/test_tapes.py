@@ -25,11 +25,11 @@ def test_bucket_label_coverage():
 
 
 def test_smallest_fitting_tape_uses_stretch_tolerance():
-    """A 47-min album fits the 46-min cassette thanks to its stretch tolerance."""
+    """A 47-min album fits the 46-min tape thanks to its stretch tolerance."""
     t = smallest_fitting_tape(47 * 60)
     assert t is not None and t.total_sec == 46 * 60
 
-    # 124-min album still fits the 120-min reel.
+    # 124-min album still fits the 120-min tape.
     t = smallest_fitting_tape(124 * 60)
     assert t is not None and t.total_sec == 120 * 60
 

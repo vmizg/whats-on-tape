@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import quote_plus
@@ -371,6 +371,13 @@ class PlannerConfig:
     #                deluxe edition rather than the full on-disk content.
     trim_mode: str = "unplaced"
 
+    # Physical tape-stock caps keyed by Tape.name. Missing keys = unlimited.
+    # 0 = don't use this size at all. Enforced by the planner so we don't plan
+    # 40 programs for a size the user only owns 2 of. When a preferred size is
+    # exhausted we first try downsizing (trim-for-fit, per trim_mode) before
+    # upsizing to the next tape that still has stock. See src/config.py.
+    tape_inventory: dict[str, int] = field(default_factory=dict)
+
 
 def _fits_as_solo(album: Album, tape: Tape, cfg: PlannerConfig) -> bool:
     """Solo-fit check using the tape's EFFECTIVE capacity (nominal + stretch tolerance).
@@ -412,6 +419,33 @@ def _side_fits_under_cap(duration_sec: int, side_cap_sec: int, cfg: PlannerConfi
         return False
     side_slack = side_cap_sec - duration_sec
     return side_slack <= _max_slack_for_side(side_cap_sec, cfg)
+
+
+def _has_stock(tape: Tape, cfg: PlannerConfig, counts: dict[str, int]) -> bool:
+    """True when this tape size still has inventory available.
+
+    Absence from cfg.tape_inventory means unlimited (the default). A cap of 0
+    effectively disables the size entirely. Otherwise we compare used vs cap.
+    """
+    cap = cfg.tape_inventory.get(tape.name)
+    if cap is None:
+        return True
+    return counts.get(tape.name, 0) < cap
+
+
+def _tapes_with_stock(cfg: PlannerConfig, counts: dict[str, int]) -> list[Tape]:
+    """Project TAPES down to only those the planner is still allowed to use.
+
+    Order is preserved (smallest-first) since every consumer of this list
+    iterates looking for the 'smallest fitting' candidate. We return a plain
+    list rather than a generator because callers often iterate it multiple
+    times in the same album loop.
+    """
+    return [t for t in TAPES if _has_stock(t, cfg, counts)]
+
+
+def _bump(tape: Tape, counts: dict[str, int]) -> None:
+    counts[tape.name] = counts.get(tape.name, 0) + 1
 
 
 def _rym_search_url(genres: list[str]) -> str:
@@ -631,6 +665,8 @@ def plan_tapes(
     lastfm: LastFmClient | None = None,
     cfg: PlannerConfig | None = None,
     progress: bool = True,
+    unplaced_reasons: dict[str, str] | None = None,
+    tape_counts_out: dict[str, int] | None = None,
 ) -> tuple[list[Assignment], list[Album]]:
     """Greedy tape planner.
 
@@ -654,6 +690,11 @@ def plan_tapes(
     trim_map: dict[str, TrimResult] = {}
     if cfg.trim_mode == "all":
         albums, trim_map = _apply_trim_all(list(albums), mb, progress)
+
+    # Running inventory of tapes consumed by committed assignments. Consulted by
+    # _has_stock / _tapes_with_stock so the planner naturally upsizes when the
+    # preferred size is exhausted (and may trim-for-downsize first; see below).
+    tape_counts: dict[str, int] = {}
 
     used_paths: set[str] = set()
     remaining_albums: list[Album] = sorted(
@@ -697,6 +738,10 @@ def plan_tapes(
             _tick("paired")
             continue
 
+        # Inventory-aware tape selection: only consider tapes that still have
+        # stock (missing from cfg.tape_inventory = unlimited; cap 0 = disabled).
+        stock_tapes = _tapes_with_stock(cfg, tape_counts)
+
         # 1) Prefer pairing on a split-capable tape when Side A itself won't
         #    waste too much of its side (we refuse loose pairings under the
         #    per-side slack cap). Scan tapes in order; the first split tape
@@ -704,7 +749,7 @@ def plan_tapes(
         #    Side B remains is the pairing target.
         split_tape: Tape | None = None
         split_side_cap: int = 0
-        for tape in TAPES:
+        for tape in stock_tapes:
             if not tape.splits:
                 continue
             if not _fits_as_solo(a, tape, cfg):
@@ -726,17 +771,97 @@ def plan_tapes(
                 split_side_cap = side_cap
                 break
 
-        # 2) The smallest tape on which the album can sit solo (for the fallback path).
+        # 2) The smallest tape (with stock) on which the album can sit solo.
         solo_tape: Tape | None = None
-        for tape in TAPES:
+        for tape in stock_tapes:
             if _fits_as_solo(a, tape, cfg):
                 solo_tape = tape
                 break
 
-        if split_tape is None and solo_tape is None:
+        # 2b) If the "ideal" smallest-fitting tape is capped out but a larger
+        #     one has stock, first try downsizing the album (trim-for-fit) to
+        #     land on a smaller tape that DOES have stock. This keeps the plan
+        #     close to the user's inventory rather than silently upsizing every
+        #     short album onto a 90-min tape just because 60-min tapes ran out.
+        # The tape this album would ideally sit on if stock were unlimited.
+        # Used both to detect "capped-and-upsized" situations (for downsize)
+        # and to produce a precise unplaced-reason further down.
+        ideal_any = next(
+            (t for t in TAPES if _fits_as_solo(a, t, cfg)),
+            None,
+        )
+
+        trim_downsize_plan: tuple[Tape, TrimResult] | None = None
+        if cfg.trim_mode != "off" and a.path not in trim_map:
+            # Activate the trim-for-downsize path when the ideal tape is
+            # unavailable due to stock AND there's at least one smaller tape
+            # with stock. Covers both "solo_tape is a larger tape than ideal"
+            # (classic upsize case) and "no solo_tape because everything big
+            # is capped" (would-be unplaced but can be rescued by trimming).
+            solo_cap = effective_total_sec(solo_tape) if solo_tape is not None else None
+            ideal_cap = effective_total_sec(ideal_any) if ideal_any is not None else None
+            needs_downsize = ideal_any is not None and (
+                solo_tape is None
+                or (ideal_cap is not None and solo_cap is not None and ideal_cap < solo_cap)
+            )
+            if needs_downsize:
+                # Search for a smaller-than-solo_tape (or anything if no
+                # solo_tape) tape that (a) has stock and (b) can fit the album
+                # after a trim. Pick the smallest such tape.
+                upper_bound = solo_cap  # may be None (no cap on smallness)
+                for smaller in stock_tapes:
+                    sm_cap = effective_total_sec(smaller)
+                    if upper_bound is not None and sm_cap >= upper_bound:
+                        break  # no point trimming to land on same-or-larger
+                    if a.duration_sec <= sm_cap:
+                        # Album already fits this smaller tape un-trimmed.
+                        # Can happen when stock caps ruled out the "ideal"
+                        # but a still-smaller tape has stock and stretch
+                        # tolerance covers the gap. method="none" keeps
+                        # `trimmed` property False so the report shows solo.
+                        trim_downsize_plan = (smaller, TrimResult(
+                            original_duration_sec=a.duration_sec,
+                            trimmed_duration_sec=a.duration_sec,
+                            method="none",
+                        ))
+                        break
+                    tr = compute_trim(a, max_tape_sec=sm_cap, mb=mb)
+                    if tr.trimmed and tr.trimmed_duration_sec <= sm_cap:
+                        trim_downsize_plan = (smaller, tr)
+                        break
+
+        if split_tape is None and solo_tape is None and trim_downsize_plan is None:
+            # Distinguish "literally too long for any tape" from "every size that
+            # WOULD fit is out of stock per tape_inventory". The latter is a
+            # recoverable user-facing situation (raise the cap or use a larger
+            # size) and deserves a dedicated reason in the report.
+            if unplaced_reasons is not None:
+                if ideal_any is not None:
+                    unplaced_reasons[a.path] = (
+                        f"tape inventory exhausted for '{ideal_any.name}'"
+                        " (and no larger size has stock either)"
+                    )
+                else:
+                    unplaced_reasons[a.path] = ""  # sentinel; report picks default
             unplaced.append(a)
             used_paths.add(a.path)
             _tick("unplaced")
+            continue
+
+        # If the trim-downsize path found a smaller tape, commit that now: the
+        # split-pairing search was against the original (un-trimmed) duration,
+        # so pairing wouldn't have been considered on the smaller tape anyway.
+        if trim_downsize_plan is not None:
+            smaller_tape, tr = trim_downsize_plan
+            trim_map[a.path] = tr
+            trimmed = replace(a, duration_sec=tr.trimmed_duration_sec) if tr.trimmed else a
+            assignments.append(_attach_trim(
+                Assignment(tape=smaller_tape, side_a=trimmed,
+                           match_kind="solo-trimmed" if tr.trimmed else "solo")
+            ))
+            _bump(smaller_tape, tape_counts)
+            used_paths.add(a.path)
+            _tick("solo-trimmed" if tr.trimmed else "solo")
             continue
 
         # Try to pair on the split-capable tape before falling back to solo.
@@ -766,13 +891,14 @@ def plan_tapes(
                 assignments.append(_attach_trim(
                     Assignment(tape=split_tape, side_a=a, side_b=partner, match_kind=match_kind)
                 ))
+                _bump(split_tape, tape_counts)
                 used_paths.add(a.path)
                 used_paths.add(partner.path)
                 _tick(match_kind)
                 continue
 
             # No local partner found for the split tape.
-            # If there is a tighter solo tape (e.g. 46min cassette) where this album would
+            # If there is a tighter solo tape (e.g. 46min) where this album would
             # almost fill the tape anyway, prefer the solo placement so we don't waste a
             # split-capable tape asking for external suggestions.
             if solo_tape is not None and solo_tape.total_sec < split_tape.total_sec:
@@ -781,6 +907,7 @@ def plan_tapes(
                     assignments.append(_attach_trim(
                         Assignment(tape=solo_tape, side_a=a, match_kind="solo")
                     ))
+                    _bump(solo_tape, tape_counts)
                     used_paths.add(a.path)
                     _tick("solo")
                     continue
@@ -841,6 +968,7 @@ def plan_tapes(
                 match_kind=kind,
                 note=note,
             )))
+            _bump(split_tape, tape_counts)
             used_paths.add(a.path)
             _tick(kind)
             continue
@@ -850,6 +978,7 @@ def plan_tapes(
         assignments.append(_attach_trim(
             Assignment(tape=solo_tape, side_a=a, match_kind="solo")
         ))
+        _bump(solo_tape, tape_counts)
         used_paths.add(a.path)
         _tick("solo")
 
@@ -861,13 +990,22 @@ def plan_tapes(
     # is unaffected for albums that already fit; only the unplaceable ones get the
     # expensive MB / tag-reading treatment.
     if cfg.trim_mode == "unplaced" and unplaced:
-        rescued = _trim_and_replace_unplaced(unplaced, mb, trim_map, cfg, progress)
+        rescued = _trim_and_replace_unplaced(unplaced, mb, trim_map, cfg, progress, tape_counts)
         if rescued:
             for asn in rescued:
                 assignments.append(_attach_trim(asn))
+                _bump(asn.tape, tape_counts)
             # Any album we successfully rescued comes out of the unplaced list.
             rescued_paths = {asn.side_a.path for asn in rescued}
             unplaced = [a for a in unplaced if a.path not in rescued_paths]
+            # Drop stale 'inventory exhausted' reasons for rescued albums.
+            if unplaced_reasons is not None:
+                for p in rescued_paths:
+                    unplaced_reasons.pop(p, None)
+
+    if tape_counts_out is not None:
+        tape_counts_out.clear()
+        tape_counts_out.update(tape_counts)
 
     return assignments, unplaced
 
@@ -878,6 +1016,7 @@ def _trim_and_replace_unplaced(
     trim_map: dict[str, TrimResult],
     cfg: PlannerConfig,
     progress: bool,
+    tape_counts: dict[str, int] | None = None,
 ) -> list[Assignment]:
     """Try to trim each over-length unplaced album and place the trimmed version
     on the smallest fitting tape (solo or as Side A with no partner committed).
@@ -887,6 +1026,10 @@ def _trim_and_replace_unplaced(
     natural fit is a solo tape. This keeps the rescue pass focused and cheap.
     """
     rescued: list[Assignment] = []
+    # `local_counts` tracks usage WITHIN the rescue pass and is layered on top
+    # of the main-loop counts. This lets consecutive rescues compete for the
+    # same stock so we don't hand out 10 copies of a size the user owns 2 of.
+    local_counts: dict[str, int] = dict(tape_counts) if tape_counts is not None else {}
     largest = _largest_tape_sec()
 
     pbar = None
@@ -914,15 +1057,15 @@ def _trim_and_replace_unplaced(
                 pbar.update(1)
             continue
 
-        # Place the trimmed copy on the smallest tape it fits.
+        # Place the trimmed copy on the smallest tape with stock that it fits.
         trimmed = replace(a, duration_sec=tr.trimmed_duration_sec)
         chosen: Tape | None = None
-        for tape in TAPES:
+        for tape in _tapes_with_stock(cfg, local_counts):
             if _fits_as_solo(trimmed, tape, cfg):
                 chosen = tape
                 break
         if chosen is None:
-            # Trim wasn't enough to fit even the largest tape. Give up.
+            # Trim wasn't enough, OR every tape size that would fit is out of stock.
             if pbar is not None:
                 pbar.update(1)
             continue
@@ -933,6 +1076,7 @@ def _trim_and_replace_unplaced(
             side_a=trimmed,
             match_kind="solo-trimmed",
         ))
+        local_counts[chosen.name] = local_counts.get(chosen.name, 0) + 1
         if pbar is not None:
             pbar.update(1)
 

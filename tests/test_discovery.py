@@ -155,3 +155,88 @@ def test_walk_library_disc_with_ambiguous_nested_audio(tmp_path: Path):
 
     folders = walk_library(root)
     assert not any(f.root == album and f.is_multi_disc for f in folders)
+
+
+def test_walk_library_skip_dirs_override_replaces_defaults(tmp_path: Path):
+    """When the caller passes `skip_dirs`, it FULLY replaces the built-in
+    list. So '# Clips' is no longer skipped if the override omits it, and a
+    new pattern like '## experiments*' gets skipped."""
+    root = tmp_path
+    a = root / "Artist - Album (2000) [CD]"
+    a.mkdir()
+    (a / "01.flac").write_bytes(b"")
+    clips = root / "# Clips"
+    clips.mkdir()
+    (clips / "loop.flac").write_bytes(b"")
+    experiments = root / "## experiments"
+    experiments.mkdir()
+    (experiments / "rough.flac").write_bytes(b"")
+
+    folders = walk_library(root, skip_dirs=("## experiments*",))
+    names = sorted(f.root.name for f in folders)
+    assert "# Clips" in names
+    assert "## experiments" not in names
+
+    # Empty tuple disables skipping entirely.
+    folders_all = walk_library(root, skip_dirs=())
+    names_all = sorted(f.root.name for f in folders_all)
+    assert "# Clips" in names_all
+    assert "## experiments" in names_all
+
+    # None (the default) keeps the built-in SKIP_DIRS, so '# Clips' is filtered.
+    folders_default = walk_library(root)
+    names_default = sorted(f.root.name for f in folders_default)
+    assert "# Clips" not in names_default
+
+
+def test_walk_library_skip_dirs_glob_matches_basename_at_any_depth(tmp_path: Path):
+    """Bare patterns (no '/') match folder basenames at any depth, so a nested
+    'Demos'-suffixed folder under a genre tree gets pruned even though the
+    default `SKIP_DIRS` only catches top-level '# clips*'-style folders."""
+    root = tmp_path
+    (root / "Rock" / "Artist - Album (2000) [CD]").mkdir(parents=True)
+    (root / "Rock" / "Artist - Album (2000) [CD]" / "01.flac").write_bytes(b"")
+    (root / "Rock" / "Artist - Demos").mkdir()
+    (root / "Rock" / "Artist - Demos" / "01.flac").write_bytes(b"")
+
+    folders = walk_library(root, skip_dirs=("* - demos",))
+    names = sorted(f.root.name for f in folders)
+    assert "Artist - Album (2000) [CD]" in names
+    assert "Artist - Demos" not in names
+
+
+def test_walk_library_skip_dirs_glob_anchored_path(tmp_path: Path):
+    """A pattern with '/' matches the full relative path, so we can scope a
+    prune to one subtree only (e.g. 'Jazz/**/Sketches' hits only Jazz sketches,
+    not Rock sketches)."""
+    root = tmp_path
+    jazz_sketches = root / "Jazz" / "Sketches"
+    jazz_sketches.mkdir(parents=True)
+    (jazz_sketches / "01.flac").write_bytes(b"")
+    rock_sketches = root / "Rock" / "Sketches"
+    rock_sketches.mkdir(parents=True)
+    (rock_sketches / "01.flac").write_bytes(b"")
+
+    folders = walk_library(root, skip_dirs=("jazz/sketches",))
+    roots = {f.root for f in folders}
+    assert jazz_sketches not in roots
+    assert rock_sketches in roots
+
+
+def test_walk_library_skip_dirs_glob_is_case_insensitive(tmp_path: Path):
+    """Matching is case-insensitive regardless of how the user spells the
+    pattern or the folder."""
+    root = tmp_path
+    loud = root / "LOUD CLIPS"
+    loud.mkdir()
+    (loud / "01.flac").write_bytes(b"")
+    ok = root / "Artist - Album (2000) [CD]"
+    ok.mkdir()
+    (ok / "01.flac").write_bytes(b"")
+
+    folders = walk_library(root, skip_dirs=("loud *",))
+    names = sorted(f.root.name for f in folders)
+    assert "LOUD CLIPS" not in names
+    assert "Artist - Album (2000) [CD]" in names
+
+

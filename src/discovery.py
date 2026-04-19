@@ -4,21 +4,33 @@ A leaf album folder is one that either:
   - directly contains audio files, or
   - whose subfolders are all "disc" folders (CD1, Disc 2, ...) that contain audio files.
 
-Some top-level folders are skipped, check and adjust SKIP_TOP_PREFIXES.
+Directories whose path matches any pattern in SKIP_DIRS are pruned during the
+walk. Patterns use pathlib-style globs matched against the folder's path
+relative to the library root (case-insensitive). See `_should_skip` for
+semantics and `walk_library` for per-call overrides.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from fnmatch import fnmatchcase
+from pathlib import Path, PurePosixPath
 
 AUDIO_EXTS = {".flac", ".mp3", ".wav", ".wv", ".dsf", ".dff", ".m4a", ".aac", ".ogg", ".opus", ".vob", ".iso", ".ape"}
 
-SKIP_TOP_PREFIXES = (
-    "# clips",
-    "# mixes and compilations",
-    "# random",
-    "# recordings & transfers",
+# Default globs for folders to prune from the walk. Matched against the
+# relative path from the library root (POSIX separators, lowercased).
+#
+# Patterns use shell-style fnmatch semantics: bare patterns (no '/') match
+# against the folder's basename at any depth, so "# clips*" prunes any folder
+# whose name starts with "# clips". Patterns containing '/' match against
+# the full relative path, so "jazz/**/demos" only prunes demos folders under
+# a top-level "jazz".
+SKIP_DIRS: tuple[str, ...] = (
+    "# clips*",
+    "# mixes and compilations*",
+    "# random*",
+    "# recordings & transfers*",
 )
 
 _DISC_RE = re.compile(r"^(cd|disc|disk|lp|vinyl|side)[\s_-]*\d+", re.IGNORECASE)
@@ -125,23 +137,53 @@ def _is_multi_disc_container(folder: Path) -> tuple[bool, list[Path]]:
     return False, []
 
 
-def _should_skip_top_level(name: str) -> bool:
-    lower = name.strip().lower()
-    return any(lower.startswith(prefix) for prefix in SKIP_TOP_PREFIXES)
+def _should_skip(rel_path: PurePosixPath, patterns: tuple[str, ...]) -> bool:
+    """Return True when `rel_path` matches any pattern.
+
+    - Patterns without '/' match against the basename only (at any depth).
+    - Patterns with '/' match against the full relative path from the library
+      root, using fnmatch (case-insensitive; already lowercased by callers).
+    """
+    if not patterns:
+        return False
+    name = rel_path.name
+    full = str(rel_path)
+    for pat in patterns:
+        if "/" in pat:
+            if fnmatchcase(full, pat):
+                return True
+        else:
+            if fnmatchcase(name, pat):
+                return True
+    return False
 
 
-def walk_library(root: Path) -> list[AlbumFolder]:
+def walk_library(
+    root: Path,
+    skip_dirs: tuple[str, ...] | None = None,
+) -> list[AlbumFolder]:
     """Return all album folders under `root`.
+
+    `skip_dirs` overrides the module-level `SKIP_DIRS` globs when given
+    (including `()` to disable skipping entirely). `None` keeps the defaults.
 
     Implementation note: we walk recursively and treat any folder with direct audio as a leaf
     album (not descending into it further). Multi-disc containers are detected one level up.
     """
     root = root.resolve()
     results: list[AlbumFolder] = []
+    effective_patterns = SKIP_DIRS if skip_dirs is None else skip_dirs
+    # Normalize to lowercase once so matching is case-insensitive without
+    # paying for re-casing per-folder.
+    effective_patterns = tuple(p.lower() for p in effective_patterns)
 
     def visit(folder: Path, depth: int) -> None:
-        if depth == 1 and _should_skip_top_level(folder.name):
-            return
+        if depth > 0:
+            # Relative path with POSIX separators, lowercased, for stable glob
+            # matching on Windows ("jazz/demos" works the same everywhere).
+            rel = PurePosixPath(folder.relative_to(root).as_posix().lower())
+            if _should_skip(rel, effective_patterns):
+                return
 
         multi, disc_folders = _is_multi_disc_container(folder)
         if multi:

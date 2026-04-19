@@ -235,7 +235,7 @@ class TestPlannerTrimIntegration:
             enabled = True
             _ready = True
             def canonical_release_length_sec(self, artist, album, year=""):
-                return 47 * 60  # fits a 54-min cassette, originally 140 min (unplaceable)
+                return 47 * 60  # fits a 54-min tape, originally 140 min (unplaceable)
 
         a = _album(str(tmp_path), "The Beatles", "Abbey Road (Super Deluxe Edition)", 140)
         cfg = PlannerConfig(
@@ -269,9 +269,9 @@ class TestPlannerTrimIntegration:
         """trim_mode='all' uses the trimmed length for greedy planning decisions.
 
         Here an 85-min deluxe version of an actually-45-min album would normally
-        land on a 90-min reel (solo), leaving the smaller cassettes unused. With
+        land on a 90-min tape (solo), leaving the smaller sizes unused. With
         trim_mode='all', the MB-canonical 45-min version lets it live on a
-        46-min cassette instead."""
+        46-min tape instead."""
         class FakeMB:
             enabled = True
             _ready = True
@@ -309,6 +309,6 @@ class TestPlannerTrimIntegration:
         )
         assignments, _ = plan_tapes([a], mb=mb, cfg=cfg)
         assert mb.calls == 0, "MB should not be consulted for albums that already fit"
-        # Album lands on its natural 46-min cassette, untrimmed.
+        # Album lands on its natural 46-min tape, untrimmed.
         assert assignments[0].side_a_original_sec == 0
         assert not assignments[0].side_a_trim_note

@@ -4,17 +4,17 @@ from __future__ import annotations
 from .models import Tape
 
 TAPES: list[Tape] = [
-    Tape(name="46min cassette", total_sec=46 * 60, split_sec=None),
-    Tape(name="54min cassette", total_sec=54 * 60, split_sec=None),
-    Tape(name="60min cassette/reel", total_sec=60 * 60, split_sec=30 * 60),
-    Tape(name="70min cassette", total_sec=70 * 60, split_sec=35 * 60),
-    Tape(name="90min cassette/reel", total_sec=90 * 60, split_sec=45 * 60),
-    Tape(name="120min reel", total_sec=120 * 60, split_sec=60 * 60),
+    Tape(name="46min", total_sec=46 * 60, split_sec=None),
+    Tape(name="54min", total_sec=54 * 60, split_sec=None),
+    Tape(name="60min", total_sec=60 * 60, split_sec=30 * 60),
+    Tape(name="70min", total_sec=70 * 60, split_sec=35 * 60),
+    Tape(name="90min", total_sec=90 * 60, split_sec=45 * 60),
+    Tape(name="120min", total_sec=120 * 60, split_sec=60 * 60),
 ]
 
 
 # How many seconds OVER a tape's nominal capacity we still consider "physically
-# fits" (cassettes typically have 1-3% extra recordable lead, and the user is
+# fits" (tapes typically have 1-3% extra recordable lead, and the user is
 # happy to accept a few seconds of clipped tail rather than skip the album
 # entirely). Keyed by capacity-in-seconds. Lookup picks the largest key
 # <= the capacity being checked, so this works for both whole-tape sizes and
