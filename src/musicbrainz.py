@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-USER_AGENT = ("MusicTapePlanner", "0.1", "https://github.com/local/music-tape-planner")
+USER_AGENT = ("WhatsOnTape", "0.1", "https://github.com/vmizg/whats-on-tape")
 CACHE_TTL_SEC = 24 * 60 * 60
 
 # Genre-search cache keys are bucketed to 30-second precision on the duration
@@ -210,9 +210,13 @@ class MBClient:
             self._cache_put(key, 0)
             return 0
 
-        sized: list[tuple[int, str]] = []
+        # Per-release stats: (seconds, release_date, track_count).
+        # We need the track count to distinguish a real LP from a promo/sampler/
+        # single-track release that MB happens to group with the album.
+        sized: list[tuple[int, str, int]] = []
         for r in releases:
             total_ms = 0
+            track_count = 0
             for m in r.get("medium-list") or r.get("media") or []:
                 for t in m.get("track-list") or m.get("tracks") or []:
                     length = t.get("length") or t.get("recording", {}).get("length")
@@ -220,24 +224,40 @@ class MBClient:
                         total_ms += int(length) if length is not None else 0
                     except (TypeError, ValueError):
                         continue
+                    track_count += 1
             sec = total_ms // 1000
             if sec > 0:
-                sized.append((sec, r.get("date", "") or ""))
+                sized.append((sec, r.get("date", "") or "", track_count))
 
         if not sized:
             self._cache_put(key, 0)
             return 0
 
-        # Prefer releases <=90 minutes (a plausible "original LP" length). Within
-        # that pool, pick the earliest by release date (tiebreak: shortest).
+        # Plausible "canonical LP" length bounds. Below ~25 min it's virtually
+        # always a promo/single/EP that MB is grouping with the album (e.g. the
+        # 11-minute "Moby - Play" 1999 promo sampler), not the LP itself.
+        # Above 90 min it's a deluxe/box we explicitly don't want to report.
+        LP_MIN = 25 * 60
         LP_MAX = 90 * 60
-        short_pool = [s for s in sized if s[0] <= LP_MAX]
-        if short_pool:
-            short_pool.sort(key=lambda x: (x[1] or "9999", x[0]))
-            chosen = short_pool[0][0]
+        core_pool = [s for s in sized if LP_MIN <= s[0] <= LP_MAX]
+
+        # Real LPs have more tracks than sampler/promo releases even when
+        # durations happen to overlap, so prefer the highest track count; break
+        # ties by earliest release date (keeps original pressings over
+        # remasters), then by shortest length.
+        if core_pool:
+            core_pool.sort(key=lambda x: (-x[2], x[1] or "9999", x[0]))
+            chosen = core_pool[0][0]
         else:
-            sized.sort(key=lambda x: x[0])
-            chosen = sized[0][0]
+            # No release in the group looks like a canonical LP. Fall back to
+            # the longest release that still fits the LP ceiling (avoids
+            # trimming a reissue down to an even-shorter sibling promo).
+            fallback = [s for s in sized if s[0] <= LP_MAX]
+            if not fallback:
+                self._cache_put(key, 0)
+                return 0
+            fallback.sort(key=lambda x: (-x[0], x[1] or "9999"))
+            chosen = fallback[0][0]
 
         self._cache_put(key, chosen)
         return chosen

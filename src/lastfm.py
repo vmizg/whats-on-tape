@@ -12,7 +12,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 CACHE_TTL_SEC = 30 * 24 * 60 * 60  # 30 days
-USER_AGENT = "MusicTapePlanner/0.1 (+https://github.com/local/music-tape-planner)"
+USER_AGENT = "WhatsOnTape/0.1 (+https://github.com/vmizg/whats-on-tape)"
 
 # Genre-search cache keys are bucketed to 30-second precision on the duration
 # bounds so near-identical Side A calculations reuse the same cached result.

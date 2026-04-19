@@ -322,13 +322,25 @@ def compute_trim(
         return result
 
     # --- MusicBrainz canonical lookup ---
+    # Sanity-check ratio: MB occasionally groups a promo/single/EP into the
+    # same release-group as the album, which would shrink e.g. a 63-min album
+    # to an 11-min "canonical". If the MB answer is less than this fraction of
+    # the on-disk length, we refuse it -- real deluxe-vs-original ratios are
+    # roughly 30-70 %, anything lower is almost certainly a wrong-release pick.
+    MB_MIN_RATIO = 0.30
     if mb is not None and getattr(mb, "enabled", False) and getattr(mb, "_ready", False):
         mb_sec = 0
         try:
             mb_sec = int(mb.canonical_release_length_sec(album.artist, album.album, album.year))
         except Exception:
             mb_sec = 0
-        if mb_sec > 0 and mb_sec + min_improvement_sec < album.duration_sec and mb_sec <= max_tape_sec:
+        plausible = (
+            mb_sec > 0
+            and mb_sec + min_improvement_sec < album.duration_sec
+            and mb_sec <= max_tape_sec
+            and (album.duration_sec <= 0 or mb_sec / album.duration_sec >= MB_MIN_RATIO)
+        )
+        if plausible:
             result.trimmed_duration_sec = mb_sec
             result.method = "mb"
             saved = album.duration_sec - mb_sec

@@ -146,6 +146,29 @@ class TestComputeTrim:
         result = compute_trim(a, max_tape_sec=120 * 60, mb=FakeMB())
         assert result.method == "none"
 
+    def test_mb_result_absurdly_shorter_than_album_is_refused(self, tmp_path):
+        """Regression: MB sometimes groups a 10-min promo/sampler with the actual
+        LP in the same release-group. Left unchecked, `compute_trim` would
+        happily shrink a 63-min album to 11 min and place it with a "saves 52 min"
+        note. The ratio guard rejects any canonical that is < 30 % of the on-disk
+        album -- real deluxe-vs-original ratios are in the 30-70 % range.
+        """
+        class FakeMB:
+            enabled = True
+            _ready = True
+            def canonical_release_length_sec(self, artist, album, year=""):
+                return 11 * 60  # 11-min promo for a 63-min LP; must be refused
+
+        # 63-min "Play" ish. Not titled as a reissue -- but compute_trim doesn't
+        # gate the MB branch on reissue-suffix detection, so this is a pure
+        # exercise of the ratio-guard path.
+        a = _album(str(tmp_path), "Moby", "Play", 63)
+        result = compute_trim(a, max_tape_sec=60 * 60, mb=FakeMB())
+        assert result.method == "none", (
+            f"expected MB result to be rejected by ratio guard, got method={result.method!r} "
+            f"trimmed={result.trimmed_duration_sec}"
+        )
+
     def test_title_heuristic_via_stub_readers(self, monkeypatch, tmp_path):
         """Drive compute_trim's title-heuristic branch by stubbing the mutagen reader.
 
