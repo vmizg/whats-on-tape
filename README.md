@@ -140,7 +140,7 @@ See `plan_config.example.json` for a full template.
 - Patterns containing `/` are matched against the **full path relative to the library root** (POSIX separators), so `"Jazz/**/Demos"` prunes any folder named `Demos` somewhere under a top-level `Jazz` folder, without touching Demos folders elsewhere.
 - `*` matches any characters (including `/`), `?` matches one character, `[abc]` matches a character class. Backslashes in patterns are auto-converted to `/`, so Windows-style paths in the config file also work.
 
-Use `[]` to scan every folder with no pruning. `scan` consumes this; `plan` accepts the same file so you can keep one config alongside the project.
+Use `[]` to scan every folder with no pruning. **Both `scan` and `plan` apply `skip_dirs`** — `scan` prunes the library walk, and `plan` re-applies the same patterns to `albums.json` so you can exclude an album by editing the config and re-running `plan`, without a full re-scan. Handy for excluding specific albums ("*Miles Davis - Kind Of Blue \**") without touching the filesystem.
 
 ### Slack caps
 
@@ -182,7 +182,7 @@ Delete any cache file to force a refetch for just that layer. Delete `.scan-cach
 
 `scan`:
 
-- `-o, --out`, `--config`, `--cache-dir`, `--no-progress`, `--workers`, `--no-enrich`, `--lastfm-key` — as above. `scan` additionally honors `skip_dirs` from the config file.
+- `-o, --out`, `--config`, `--cache-dir`, `--no-progress`, `--workers`, `--no-enrich`, `--lastfm-key` — as above. Both `scan` and `plan` honor `skip_dirs` from the config file (scan prunes the walk; plan filters `albums.json`).
 
 ## Library layout expected
 

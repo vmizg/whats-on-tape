@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .config import ConfigError, PlanConfig, load_config
+from .discovery import infer_library_root, matches_skip_patterns
 from .dotenv import load_dotenv
 from .lastfm import LastFmClient
 from .musicbrainz import MBClient
@@ -78,7 +79,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Path to plan_config.json. When omitted, ./plan_config.json is used "
             "if present. Reads `tape_inventory` (max tapes per size) and "
-            "`skip_dirs` (informational for plan; scan applies it)."
+            "`skip_dirs` (filters albums.json entries that match, so you can "
+            "exclude albums without a re-scan)."
         ),
     )
     plan.add_argument(
@@ -190,6 +192,24 @@ def cmd_plan(args: argparse.Namespace) -> int:
             print(f"  tape_inventory: {pairs}")
 
     albums = read_albums_json(albums_path)
+    # Apply skip_dirs from config to the loaded albums too, not just scan. This
+    # lets the user re-plan after editing `skip_dirs` without a full re-scan,
+    # and keeps the config as a single source of truth for "which albums
+    # count?". A path-anchored pattern (one containing '/') needs the library
+    # root to resolve the same relative path `scan` would have computed;
+    # infer it from the common ancestor of album paths in albums.json.
+    if plan_cfg.skip_dirs:
+        library_root = infer_library_root([a.path for a in albums])
+        before = len(albums)
+        albums = [
+            a for a in albums
+            if not matches_skip_patterns(
+                a.path, plan_cfg.skip_dirs, library_root=library_root
+            )
+        ]
+        dropped = before - len(albums)
+        if dropped:
+            print(f"Filtered {dropped} album(s) via config `skip_dirs`")
     if args.candidates:
         if not args.candidates.exists():
             print(f"error: candidates file not found: {args.candidates}", file=sys.stderr)

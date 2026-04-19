@@ -158,6 +158,72 @@ def _should_skip(rel_path: PurePosixPath, patterns: tuple[str, ...]) -> bool:
     return False
 
 
+def matches_skip_patterns(
+    folder_path: str | Path,
+    patterns: tuple[str, ...],
+    library_root: str | Path | None = None,
+) -> bool:
+    """Public companion to `_should_skip` usable with absolute paths.
+
+    Callers that already have an absolute `folder_path` and (optionally) the
+    library root can use this to apply the same skip-dir semantics the
+    library walker does, without re-traversing the filesystem. `plan` uses
+    this to filter albums.json entries by the same globs `scan` would have
+    pruned.
+
+    When `library_root` is None or the folder is not under it, we match
+    against the folder's basename only (bare patterns still work; path-
+    anchored patterns simply won't match -- which is the honest outcome,
+    since we can't compute a relative path without a root).
+    """
+    if not patterns:
+        return False
+    folder = Path(folder_path)
+    rel: PurePosixPath
+    if library_root is not None:
+        try:
+            rel = PurePosixPath(
+                folder.relative_to(Path(library_root)).as_posix().lower()
+            )
+        except ValueError:
+            # Path isn't under the declared root. Fall back to basename match.
+            rel = PurePosixPath(folder.name.lower())
+    else:
+        rel = PurePosixPath(folder.name.lower())
+    lowered = tuple(p.lower() for p in patterns)
+    return _should_skip(rel, lowered)
+
+
+def infer_library_root(album_paths: list[str]) -> Path | None:
+    """Best-effort shared root across absolute album paths.
+
+    `albums.json` doesn't currently store the library root, but it's recoverable
+    as the common ancestor of all album folders. If we got 3 album paths
+    `H:\\Music\\X`, `H:\\Music\\Y\\Z`, `H:\\Music\\W`, the library root is
+    `H:\\Music`. Used by `plan` so that path-anchored skip patterns resolve
+    the same relative paths scan would have computed.
+
+    Returns None on mixed-drive paths (Windows) or a single empty list.
+    """
+    paths = [p for p in album_paths if p]
+    if not paths:
+        return None
+    try:
+        import os as _os
+        common = _os.path.commonpath([str(Path(p)) for p in paths])
+        if not common:
+            return None
+        # `commonpath` returns the deepest shared component, which for a
+        # single album would be the album itself. In that case its parent is
+        # a better stand-in for the library root.
+        root = Path(common)
+        if len(paths) == 1:
+            return root.parent
+        return root
+    except (ValueError, OSError):
+        return None
+
+
 def walk_library(
     root: Path,
     skip_dirs: tuple[str, ...] | None = None,

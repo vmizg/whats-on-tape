@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from src.discovery import is_disc_folder_name, walk_library
+from src.discovery import (
+    infer_library_root,
+    is_disc_folder_name,
+    matches_skip_patterns,
+    walk_library,
+)
 
 
 def test_is_disc_folder_name():
@@ -240,3 +245,71 @@ def test_walk_library_skip_dirs_glob_is_case_insensitive(tmp_path: Path):
     assert "Artist - Album (2000) [CD]" in names
 
 
+# ---------------------------------------------------------------------------
+# matches_skip_patterns / infer_library_root
+#
+# These power `plan`'s ability to re-apply `skip_dirs` from the config against
+# an already-scanned albums.json, without touching the filesystem. The tests
+# below lock in the semantics the CLI relies on.
+# ---------------------------------------------------------------------------
+
+def test_matches_skip_patterns_basename_with_library_root():
+    """The common real-world case: a user adds a skip for a specific album
+    folder by basename, and the album lives one level deep under an artist
+    folder. The bare pattern must still match at that depth."""
+    root = Path("H:/Music")
+    album = root / "Miles Davis" / "Miles Davis - Kind Of Blue (Legacy Edition) (1959) [Tidal]"
+    assert matches_skip_patterns(
+        album,
+        ("Miles Davis - Kind Of Blue *",),
+        library_root=root,
+    ) is True
+
+
+def test_matches_skip_patterns_anchored_path_with_library_root():
+    """A '/'-containing pattern resolves against the path relative to the
+    library root, so the user can scope a skip to one subtree."""
+    root = Path("H:/Music")
+    jazz_album = root / "Jazz" / "Miles Davis - Kind Of Blue (1959) [CD]"
+    rock_album = root / "Rock" / "Miles Davis - Kind Of Blue (1959) [CD]"  # hypothetical dupe
+    pat = ("Jazz/Miles Davis - Kind Of Blue *",)
+    assert matches_skip_patterns(jazz_album, pat, library_root=root) is True
+    assert matches_skip_patterns(rock_album, pat, library_root=root) is False
+
+
+def test_matches_skip_patterns_falls_back_to_basename_without_root():
+    """When we can't compute a relative path, path-anchored patterns are
+    dropped (they can't match without a root) but basename patterns still
+    work. This keeps `plan` useful even if library-root inference fails."""
+    album = Path("H:/Music/Artist/Album - Demo (2020) [CD]")
+    assert matches_skip_patterns(album, ("* - Demo *",), library_root=None) is True
+    assert matches_skip_patterns(album, ("Rock/* - Demo *",), library_root=None) is False
+
+
+def test_matches_skip_patterns_empty_patterns_is_noop():
+    assert matches_skip_patterns(Path("H:/Music/Anything"), (), library_root=None) is False
+
+
+def test_infer_library_root_single_album():
+    """A single album in albums.json still needs a sensible root so path-
+    anchored skip patterns can resolve; we take the album's parent."""
+    root = infer_library_root(["H:/Music/Miles Davis/Kind Of Blue (1959) [CD]"])
+    # Normalize to string for cross-platform comparison of the components.
+    assert root is not None
+    assert root.as_posix().lower().endswith("music/miles davis")
+
+
+def test_infer_library_root_multiple_albums():
+    paths = [
+        "H:/Music/Miles Davis/Kind Of Blue (1959) [CD]",
+        "H:/Music/AC-DC - Back In Black (1980) [CD]",
+        "H:/Music/Pop/ABBA - Arrival (1976) [Vinyl]",
+    ]
+    root = infer_library_root(paths)
+    assert root is not None
+    assert root.as_posix().lower() == "h:/music"
+
+
+def test_infer_library_root_handles_empty_list():
+    assert infer_library_root([]) is None
+    assert infer_library_root([""]) is None
