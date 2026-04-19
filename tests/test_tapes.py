@@ -1,4 +1,4 @@
-from src.tapes import TAPES, bucket_label, format_hms, smallest_fitting_tape
+from src.tapes import TAPES, bucket_label, format_hms, smallest_fitting_tape, stretch_tolerance_sec
 
 
 def test_smallest_fitting_tape_short():
@@ -22,6 +22,30 @@ def test_bucket_label_coverage():
     assert "<=46" in labels
     assert any("70<x<=90" in l or l == "70<x<=90" for l in labels)
     assert bucket_label(9999 * 60) == ">120 (won't fit)"
+
+
+def test_smallest_fitting_tape_uses_stretch_tolerance():
+    """A 47-min album fits the 46-min cassette thanks to its stretch tolerance."""
+    t = smallest_fitting_tape(47 * 60)
+    assert t is not None and t.total_sec == 46 * 60
+
+    # 124-min album still fits the 120-min reel.
+    t = smallest_fitting_tape(124 * 60)
+    assert t is not None and t.total_sec == 120 * 60
+
+    # 130 min is comfortably outside the stretch zone (120 + 5 = 125), so still no fit.
+    assert smallest_fitting_tape(130 * 60) is None
+
+
+def test_stretch_tolerance_sec_lookup_rules():
+    assert stretch_tolerance_sec(30 * 60) == 120
+    assert stretch_tolerance_sec(45 * 60) == 180
+    assert stretch_tolerance_sec(120 * 60) == 300
+    # Unknown capacity falls back to the largest key <= capacity (here, the 120-min entry).
+    assert stretch_tolerance_sec(200 * 60) == 300
+    # Below the smallest key but >0 picks the 0 baseline.
+    assert stretch_tolerance_sec(10 * 60) == 60
+    assert stretch_tolerance_sec(0) == 0
 
 
 def test_format_hms():

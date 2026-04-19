@@ -24,6 +24,16 @@ def _build_parser() -> argparse.ArgumentParser:
     scan = sub.add_parser("scan", help="Scan a music library and emit albums.json + report.md")
     scan.add_argument("root", type=Path, help="Root library directory (e.g. H:\\Music)")
     scan.add_argument("-o", "--out", type=Path, default=Path("out"), help="Output directory")
+    scan.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path(".cache"),
+        help=(
+            "Directory for the four on-disk caches (.scan-cache, .mb-cache, "
+            ".lastfm-cache, .wiki-cache). Defaults to ./.cache. Sharing a "
+            "single cache across runs avoids repeating slow external lookups."
+        ),
+    )
     scan.add_argument("--no-progress", action="store_true", help="Disable progress bar")
     scan.add_argument("--workers", type=int, default=None, help="Parallel workers (default: 2x CPU, capped at 16)")
     scan.add_argument("--no-enrich", action="store_true", help="Skip online genre enrichment for albums with empty GENRE tags")
@@ -36,6 +46,17 @@ def _build_parser() -> argparse.ArgumentParser:
     plan = sub.add_parser("plan", help="Plan tapes from a previously scanned albums.json")
     plan.add_argument("albums_json", type=Path, help="Path to albums.json produced by scan")
     plan.add_argument("-o", "--out", type=Path, default=Path("out"), help="Output directory")
+    plan.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path(".cache"),
+        help=(
+            "Directory for the .mb-cache and .lastfm-cache files. Defaults to "
+            "./.cache. Reusing a single cache directory avoids repeating "
+            "MusicBrainz and Last.fm lookups across runs (with vs without "
+            "--trim, different --max-slack values, etc.)."
+        ),
+    )
     plan.add_argument("--candidates", type=Path, default=None, help="Optional list of album paths to consider (one per line)")
     plan.add_argument("--no-musicbrainz", action="store_true", help="Skip MusicBrainz lookups for filler suggestions")
     plan.add_argument("--no-lastfm", action="store_true", help="Skip Last.fm lookups for filler suggestions (only used if --lastfm-key or LASTFM_API_KEY is set)")
@@ -101,6 +122,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         workers=args.workers,
         enrich=not args.no_enrich,
         lastfm_key=lastfm_key,
+        cache_dir=args.cache_dir,
     )
     print(f"Scanned {len(albums)} albums -> {out / 'albums.json'}")
     print(f"Report: {out / 'report.md'}")
@@ -123,13 +145,15 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
+    cache_dir: Path = args.cache_dir
+    cache_dir.mkdir(parents=True, exist_ok=True)
     use_mb = not args.no_musicbrainz and not args.skip_external
     use_lf = not args.no_lastfm and not args.skip_external
-    mb = MBClient(cache_path=out / ".mb-cache.json", enabled=use_mb)
+    mb = MBClient(cache_path=cache_dir / ".mb-cache.json", enabled=use_mb)
     lastfm_key = args.lastfm_key or os.environ.get("LASTFM_API_KEY", "").strip() or None
     lastfm = None
     if use_lf and lastfm_key:
-        lastfm = LastFmClient(api_key=lastfm_key, cache_path=out / ".lastfm-cache.json")
+        lastfm = LastFmClient(api_key=lastfm_key, cache_path=cache_dir / ".lastfm-cache.json")
     cfg = PlannerConfig(
         buffer_sec=args.buffer_sec,
         allow_musicbrainz=use_mb,

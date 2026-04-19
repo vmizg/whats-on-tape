@@ -4,8 +4,7 @@ A leaf album folder is one that either:
   - directly contains audio files, or
   - whose subfolders are all "disc" folders (CD1, Disc 2, ...) that contain audio files.
 
-Top-level buckets starting with `# Clips`, `# Mixes and compilations`, `# Random`, and
-`# Recordings & transfers` are skipped; `# Soundtracks` is kept.
+Some top-level folders are skipped, check and adjust SKIP_TOP_PREFIXES.
 """
 from __future__ import annotations
 

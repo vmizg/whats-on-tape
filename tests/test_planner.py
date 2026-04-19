@@ -238,20 +238,22 @@ def test_roosevelt_style_loose_pairing_no_longer_happens():
 
 
 def test_strict_side_fit_rejects_b_longer_than_side():
-    """Integration test: in strict mode the planner must never pair an album longer
-    than `split_sec - buffer` onto the B-side of a split tape."""
-    # A (28 min) is side A of a 60-min split; a hypothetical 31-min filler would be
-    # rejected because it exceeds the 30-min physical side.
+    """In strict mode the planner must never pair an album that exceeds a side's
+    EFFECTIVE capacity (nominal + stretch tolerance) onto that side.
+
+    A 30-min split-side has a 120s stretch tolerance by default, so a 31-min album
+    DOES fit there (covered separately by test_stretch_tolerance_allows_*). Here
+    we use 35 min, comfortably beyond the stretch zone.
+    """
     a = album("A", "Side A", 28 * 60, ["Rock"])
-    b = album("B", "Oversize", 31 * 60, ["Rock"])
+    b = album("B", "Oversize", 35 * 60, ["Rock"])
     cfg = PlannerConfig(allow_musicbrainz=False, allow_lastfm=False, buffer_sec=60)
     assignments, _ = plan_tapes([a, b], mb=None, cfg=cfg)
-    # B(31) is processed first (longest). It won't fit ANY 30-min side, so it moves
-    # up to a 70-min split (35-min sides) where A(28) is a valid partner -- both fit
-    # their sides under cap. The actual regression we're guarding against is "B on a
-    # 30-min side in strict mode", so verify that no 60-min pairing exists.
+    # B(35) doesn't fit ANY 30-min side, so any pairing of B happens on a larger
+    # split tape (70-min has 35-min sides which still leaves no margin; 90-min has
+    # 45-min sides where it fits comfortably).
     pair_60 = [x for x in assignments if x.side_b is not None and x.tape.total_sec == 60 * 60]
-    assert not pair_60, "strict mode must not pair a 31-min B-side on a 30-min tape side"
+    assert not pair_60, "strict mode must not pair a 35-min B-side on a 30-min tape side"
 
 
 def test_per_side_slack_reported_for_split_tape():
@@ -304,3 +306,66 @@ def test_lt_translations_resolve_via_parent_map():
         "LT translations with no PARENT_MAP entry / parent bucket: "
         + ", ".join(f"{lt!r}->{en!r}" for lt, en in unmapped)
     )
+
+
+# ---------------------------------------------------------------------------
+# Stretch tolerance (per-tape over-capacity allowance)
+# ---------------------------------------------------------------------------
+
+def test_stretch_tolerance_allows_31_min_album_on_30_min_side():
+    """A 31-minute album fits a 30-min side of a 60-min split tape thanks to
+    the 120s default stretch tolerance. The user explicitly asked for this."""
+    a = album("A", "Side A", 31 * 60, ["Rock"])
+    b = album("B", "Side B", 28 * 60, ["Rock"])
+    cfg = PlannerConfig(allow_musicbrainz=False, allow_lastfm=False, buffer_sec=60)
+    assignments, unplaced = plan_tapes([a, b], mb=None, cfg=cfg)
+    assert unplaced == []
+    paired = [x for x in assignments if x.side_b is not None]
+    assert paired, "31+28 should produce a paired 60-min split tape"
+    p = paired[0]
+    assert p.tape.total_sec == 60 * 60
+    assert {p.side_a.duration_sec, p.side_b.duration_sec} == {31 * 60, 28 * 60}
+
+
+def test_stretch_tolerance_allows_124_min_album_on_120_min_tape():
+    """A 124-min album fits the 120-min reel solo (300s tolerance for 120-min)."""
+    a = album("A", "Long", 124 * 60, ["Rock"])
+    cfg = PlannerConfig(allow_musicbrainz=False, allow_lastfm=False, buffer_sec=60)
+    assignments, unplaced = plan_tapes([a], mb=None, cfg=cfg)
+    assert unplaced == []
+    assert assignments[0].tape.total_sec == 120 * 60
+    assert assignments[0].match_kind == "solo"
+
+
+def test_stretch_tolerance_does_not_help_when_album_too_long():
+    """Beyond the stretch zone (e.g. 130-min album on 120-min tape) it stays unplaced."""
+    a = album("A", "TooLong", 130 * 60, ["Rock"])
+    cfg = PlannerConfig(
+        allow_musicbrainz=False, allow_lastfm=False, trim_mode="off",
+    )
+    assignments, unplaced = plan_tapes([a], mb=None, cfg=cfg)
+    assert assignments == []
+    assert len(unplaced) == 1
+
+
+def test_stretch_tolerance_lookup_picks_largest_key_under_capacity():
+    """Sanity-check the stretch_tolerance_sec helper: a 50-min capacity should
+    use the 45-min entry (180s), not the 60-min entry (180s either, but the
+    selection rule is `largest key <= capacity`)."""
+    from src.tapes import effective_split_sec, effective_total_sec, stretch_tolerance_sec
+
+    assert stretch_tolerance_sec(30 * 60) == 120
+    assert stretch_tolerance_sec(31 * 60) == 120  # falls back to 30-min entry
+    assert stretch_tolerance_sec(45 * 60) == 180
+    assert stretch_tolerance_sec(60 * 60) == 180
+    assert stretch_tolerance_sec(120 * 60) == 300
+    assert stretch_tolerance_sec(0) == 0
+
+    # And the convenience wrappers compose correctly.
+    from src.tapes import TAPES
+    t60 = next(t for t in TAPES if t.total_sec == 60 * 60)
+    assert effective_total_sec(t60) == 60 * 60 + 180
+    assert effective_split_sec(t60) == 30 * 60 + 120  # split_sec is 30 min
+    t46 = next(t for t in TAPES if t.total_sec == 46 * 60)
+    assert effective_total_sec(t46) == 46 * 60 + 180
+    assert effective_split_sec(t46) is None  # non-split tape

@@ -136,9 +136,19 @@ def scan_library(
     workers: int | None = None,
     enrich: bool = True,
     lastfm_key: str | None = None,
+    cache_dir: Path | None = None,
 ) -> list[Album]:
+    """Scan the library and emit albums.json + report.md.
+
+    `cache_dir` (when given) is used for the four on-disk caches (.scan-cache,
+    .mb-cache, .lastfm-cache, .wiki-cache). When None, defaults to ./.cache.
+    Sharing a single cache across multiple runs (e.g. plan with vs without
+    --trim) avoids repeating the slow MB / Last.fm / Wikipedia lookups.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = out_dir / ".scan-cache.json"
+    cdir = cache_dir if cache_dir is not None else Path(".cache")
+    cdir.mkdir(parents=True, exist_ok=True)
+    cache_path = cdir / ".scan-cache.json"
     cache = _load_cache(cache_path)
     fresh_cache: dict[str, dict[str, Any]] = {}
 
@@ -206,7 +216,7 @@ def scan_library(
     # Genre enrichment for albums that still lack a GENRE tag.
     if enrich:
         mb_client, lastfm_client, wiki_client = build_clients(
-            out_dir, enable_mb=True, lastfm_key=lastfm_key, enable_wiki=True
+            cdir, enable_mb=True, lastfm_key=lastfm_key, enable_wiki=True
         )
         summary = enrich_albums(
             albums, mb=mb_client, lastfm=lastfm_client, wiki=wiki_client, progress=progress

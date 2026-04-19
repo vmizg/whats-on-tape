@@ -4,7 +4,13 @@ __pycache__/
 venv/
 .env
 out/
-.*-cache.json
+out_trim_off/
+out_trim_all/
+.lastfm-cache.json
+.mb-cache.json
+.scan-cache.json
+.wikipedia-cache.json
+.cache/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

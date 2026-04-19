@@ -10,13 +10,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 from urllib.parse import quote_plus
 
 from .lastfm import LastFmClient
 from .models import Album, Assignment, SideCandidate, Tape
 from .musicbrainz import MBClient
-from .tapes import TAPES
+from .tapes import TAPES, effective_split_sec, effective_total_sec
 from .trim import TrimResult, compute_trim, is_compilation_title
 
 # Rough parent-genre normalization. Kept small and practical; extend as needed.
@@ -373,12 +373,25 @@ class PlannerConfig:
 
 
 def _fits_as_solo(album: Album, tape: Tape, cfg: PlannerConfig) -> bool:
-    return album.duration_sec + cfg.buffer_sec <= tape.total_sec
+    """Solo-fit check using the tape's EFFECTIVE capacity (nominal + stretch tolerance).
+
+    The buffer is intentionally NOT applied here so that a 31-min album fits a
+    30-min side with the default 120s tolerance. The buffer remains in effect for
+    pairing decisions, where headroom between two albums actually matters.
+    """
+    return album.duration_sec <= effective_total_sec(tape)
 
 
 def _side_capacity_sec(tape: Tape) -> int:
-    """Physical capacity of one side. For solo (non-split) tapes, the whole tape IS the side."""
-    return tape.split_sec if tape.split_sec is not None else tape.total_sec
+    """Effective capacity of one side (nominal split_sec + stretch tolerance).
+
+    For solo (non-split) tapes, the whole tape IS the side so we use the full
+    effective total length instead.
+    """
+    eff_split = effective_split_sec(tape)
+    if eff_split is not None:
+        return eff_split
+    return effective_total_sec(tape)
 
 
 def _max_slack_for_side(side_cap_sec: int, cfg: PlannerConfig) -> int:
@@ -387,13 +400,15 @@ def _max_slack_for_side(side_cap_sec: int, cfg: PlannerConfig) -> int:
 
 
 def _side_fits_under_cap(duration_sec: int, side_cap_sec: int, cfg: PlannerConfig) -> bool:
-    """True when an album of this duration fits on a side AND the resulting side-slack is within the cap.
+    """True when an album of this duration fits on a side AND the resulting
+    side-slack is within the cap.
 
-    Side slack = side_cap_sec - duration_sec. The buffer is intentionally NOT charged to
-    the slack number (slack means unused playable time; buffer is headroom that's always
-    eaten regardless).
+    `side_cap_sec` is expected to be the EFFECTIVE side capacity (nominal +
+    stretch tolerance). Slack is computed against that effective capacity, so an
+    album that fully consumes the stretch zone shows ~0 slack rather than a
+    negative number.
     """
-    if duration_sec + cfg.buffer_sec > side_cap_sec:
+    if duration_sec > side_cap_sec:
         return False
     side_slack = side_cap_sec - duration_sec
     return side_slack <= _max_slack_for_side(side_cap_sec, cfg)
@@ -548,7 +563,8 @@ def _search_url_candidates(side_a: Album) -> list[SideCandidate]:
 
 
 def _largest_tape_sec() -> int:
-    return max(t.total_sec for t in TAPES)
+    """Largest EFFECTIVE tape capacity, used as the trim heuristic's upper bound."""
+    return max(effective_total_sec(t) for t in TAPES)
 
 
 def _apply_trim_all(
@@ -584,7 +600,7 @@ def _apply_trim_all(
         # album already fits the smallest tape, skip outright. Same if it looks
         # like a compilation (refused by compute_trim anyway; short-circuit to
         # save one trim call per compilation album).
-        if a.duration_sec <= TAPES[0].total_sec:
+        if a.duration_sec <= effective_total_sec(TAPES[0]):
             out.append(a)
             if pbar is not None:
                 pbar.update(1)
@@ -699,11 +715,12 @@ def plan_tapes(
                 continue
             # Space left on the OTHER side for B. Without strict mode we allow
             # Side B to spill into what would be Side A's remaining minutes, matching
-            # the old behavior (useful for cross-midpoint programs).
+            # the old behavior (useful for cross-midpoint programs). Both modes use
+            # EFFECTIVE capacities so the stretch tolerance applies symmetrically.
             if cfg.strict_side_fit:
                 b_max = side_cap - cfg.buffer_sec
             else:
-                b_max = tape.total_sec - a.duration_sec - cfg.buffer_sec
+                b_max = effective_total_sec(tape) - a.duration_sec - cfg.buffer_sec
             if b_max >= min_side_b_sec:
                 split_tape = tape
                 split_side_cap = side_cap
@@ -724,11 +741,12 @@ def plan_tapes(
 
         # Try to pair on the split-capable tape before falling back to solo.
         if split_tape is not None:
-            # Upper bound on B: physical side (strict) or remaining budget (overlapping).
+            # Upper bound on B: physical side (strict) or remaining budget
+            # (overlapping). Both branches use effective capacities.
             if cfg.strict_side_fit:
                 b_max_sec = split_side_cap
             else:
-                b_max_sec = split_tape.total_sec - a.duration_sec
+                b_max_sec = effective_total_sec(split_tape) - a.duration_sec
             # Lower bound on B: whichever is tighter between the minimum-room threshold
             # and the slack-cap floor (keep B-side slack <= cap).
             b_side_slack_cap = _max_slack_for_side(split_side_cap, cfg)
@@ -758,7 +776,7 @@ def plan_tapes(
             # almost fill the tape anyway, prefer the solo placement so we don't waste a
             # split-capable tape asking for external suggestions.
             if solo_tape is not None and solo_tape.total_sec < split_tape.total_sec:
-                slack = solo_tape.total_sec - a.duration_sec - cfg.buffer_sec
+                slack = effective_total_sec(solo_tape) - a.duration_sec - cfg.buffer_sec
                 if slack < min_side_b_sec:
                     assignments.append(_attach_trim(
                         Assignment(tape=solo_tape, side_a=a, match_kind="solo")
@@ -768,8 +786,35 @@ def plan_tapes(
                     continue
 
             # Otherwise escalate: MusicBrainz, then Last.fm, then search URLs.
-            if pbar is not None:
-                pbar.set_postfix_str(f"ext lookup: {a.artist[:24]}", refresh=True)
+            # The "ext lookup" postfix is only meaningful when we're actually
+            # about to hit the network. Skip it when:
+            #   - both MB and Last.fm are disabled/offline, OR
+            #   - all MB genre lookups for this album are already cached (in
+            #     which case the call resolves in microseconds and the label
+            #     would flicker misleadingly).
+            mb_live = (
+                cfg.allow_musicbrainz
+                and mb is not None
+                and getattr(mb, "enabled", False)
+                and getattr(mb, "_ready", False)
+            )
+            lf_live = cfg.allow_lastfm and lastfm is not None
+            if pbar is not None and (mb_live or lf_live):
+                target_max = b_max_sec - cfg.buffer_sec
+                target_min = max(b_min_sec, int(target_max * cfg.mb_min_ratio))
+                genres = _genres_to_try(a)
+                # `is_genre_search_cached` is present on real clients but may be
+                # missing on test doubles; assume "not cached" in that case so
+                # the postfix still appears, matching pre-optimization behavior.
+                def _all_cached(client: Any, live: bool) -> bool:
+                    if not live:
+                        return True
+                    probe = getattr(client, "is_genre_search_cached", None)
+                    if probe is None:
+                        return False
+                    return all(probe(g, target_max, target_min) for g in genres)
+                if not (_all_cached(mb, mb_live) and _all_cached(lastfm, lf_live)):
+                    pbar.set_postfix_str(f"ext lookup: {a.artist[:24]}", refresh=True)
             mb_cands = _mb_candidates(a, b_max_sec, b_min_sec, cfg, mb)
             seen_labels = {c.label.lower() for c in mb_cands}
             lf_cands: list[SideCandidate] = []

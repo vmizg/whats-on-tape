@@ -13,6 +13,16 @@ from urllib.request import Request, urlopen
 
 CACHE_TTL_SEC = 30 * 24 * 60 * 60  # 30 days
 USER_AGENT = "MusicTapePlanner/0.1 (+https://github.com/local/music-tape-planner)"
+
+# Genre-search cache keys are bucketed to 30-second precision on the duration
+# bounds so near-identical Side A calculations reuse the same cached result.
+_GENRE_DURATION_BUCKET_SEC = 30
+
+
+def _genre_cache_key(genre: str, max_sec: int, min_sec: int, limit: int) -> str:
+    mx = (max_sec // _GENRE_DURATION_BUCKET_SEC) * _GENRE_DURATION_BUCKET_SEC
+    mn = (min_sec // _GENRE_DURATION_BUCKET_SEC) * _GENRE_DURATION_BUCKET_SEC
+    return f"tagalbums|{genre.lower()}|max={mx}|min={mn}|limit={limit}"
 BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 MIN_INTERVAL_SEC = 0.25  # ~4 req/sec; Last.fm allows higher but we're polite
 
@@ -132,6 +142,19 @@ class LastFmClient:
         self._cache_put(key, total)
         return total
 
+    def is_genre_search_cached(
+        self,
+        genre: str,
+        max_duration_sec: int,
+        min_duration_sec: int = 0,
+        limit: int = 40,
+    ) -> bool:
+        """Return True if `search_albums_by_genre` would resolve entirely from cache."""
+        if not self.enabled or not genre:
+            return True
+        key = _genre_cache_key(genre, max_duration_sec, min_duration_sec, limit)
+        return self._cache_get(key) is not None
+
     def search_albums_by_genre(
         self,
         genre: str,
@@ -148,7 +171,7 @@ class LastFmClient:
         if not self.enabled or not genre:
             return []
 
-        key = f"tagalbums|{genre.lower()}|max={max_duration_sec}|min={min_duration_sec}|limit={limit}"
+        key = _genre_cache_key(genre, max_duration_sec, min_duration_sec, limit)
         cached = self._cache_get(key)
         if cached is not None:
             return list(cached)

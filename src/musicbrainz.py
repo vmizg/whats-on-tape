@@ -17,6 +17,18 @@ from typing import Any
 USER_AGENT = ("MusicTapePlanner", "0.1", "https://github.com/local/music-tape-planner")
 CACHE_TTL_SEC = 24 * 60 * 60
 
+# Genre-search cache keys are bucketed to 30-second precision on the duration
+# bounds. Without this, every slightly-different Side A computes slightly-different
+# `b_max_sec`/`b_min_sec` values (e.g. 2578 vs 2580) and misses an otherwise-
+# identical cached result, forcing a new 1-req/sec MusicBrainz call.
+_GENRE_DURATION_BUCKET_SEC = 30
+
+
+def _genre_cache_key(genre: str, max_sec: int, min_sec: int, limit: int) -> str:
+    mx = (max_sec // _GENRE_DURATION_BUCKET_SEC) * _GENRE_DURATION_BUCKET_SEC
+    mn = (min_sec // _GENRE_DURATION_BUCKET_SEC) * _GENRE_DURATION_BUCKET_SEC
+    return f"genre={genre.lower()}|max={mx}|min={mn}|limit={limit}"
+
 
 class MBClient:
     def __init__(self, cache_path: Path, enabled: bool = True):
@@ -230,6 +242,19 @@ class MBClient:
         self._cache_put(key, chosen)
         return chosen
 
+    def is_genre_search_cached(
+        self,
+        genre: str,
+        max_duration_sec: int,
+        min_duration_sec: int = 0,
+        limit: int = 40,
+    ) -> bool:
+        """Return True if `search_albums_by_genre` would resolve entirely from cache."""
+        if not self.enabled or not self._ready or not genre:
+            return True  # no network call would happen; treat as "not a network hit"
+        key = _genre_cache_key(genre, max_duration_sec, min_duration_sec, limit)
+        return self._cache_get(key) is not None
+
     def search_albums_by_genre(
         self,
         genre: str,
@@ -243,7 +268,7 @@ class MBClient:
         if not self.enabled or not self._ready or not genre:
             return []
 
-        key = f"genre={genre.lower()}|max={max_duration_sec}|min={min_duration_sec}|limit={limit}"
+        key = _genre_cache_key(genre, max_duration_sec, min_duration_sec, limit)
         cached = self._cache_get(key)
         if cached is not None:
             return list(cached)
